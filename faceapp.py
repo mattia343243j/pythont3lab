@@ -1,109 +1,96 @@
-import sys
-import cv2
+import sys, cv2
+from PySide6.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QImage, QPixmap, QFont
 
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QPushButton, QLabel,
-    QVBoxLayout, QHBoxLayout
-)
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QImage, QPixmap
-
-
-class FaceApp(QWidget):
+class App(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Face App")
-        self.resize(800, 600)
+        self.setWindowTitle("Accesso Biometrico")
+        self.resize(820, 620)
 
-        # Webcam
+        QApplication.instance().setFont(QFont("Segoe UI", 10))
+
         self.cap = None
-
-        # Colori cerchio (BGR)
-        self.colors = [
-            (0, 255, 0),    # verde
-            (0, 0, 255),    # rosso
-            (255, 0, 0),    # blu
-            (0, 255, 255),  # giallo
-        ]
-        self.color_index = 0
-
-        # Face detector
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades +
-            "haarcascade_frontalface_default.xml"
+        self.color = (255, 180, 0)   # azzurro (BGR)
+        self.face = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
 
-        # UI
-        self.video_label = QLabel()
-        self.video_label.setFixedSize(640, 480)
+        self.title = QLabel("Verifica identità")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setStyleSheet("font-size:18px;font-weight:600;color:#ffa500")
 
-        self.btn_camera = QPushButton("Apri fotocamera")
-        self.btn_color = QPushButton("Cambia colore")
+        self.video = QLabel("In attesa della scansione")
+        self.video.setAlignment(Qt.AlignCenter)
+        self.video.setFixedSize(640, 480)
+        self.video.setStyleSheet(
+            "background:#050402;border:2px solid #4aa3df;color:#8b8c7a"
+        )
 
-        self.btn_camera.clicked.connect(self.toggle_camera)
-        self.btn_color.clicked.connect(self.change_color)
+        self.btn_scan = QPushButton("Avvia scansione")
+        self.btn_scan.setMinimumHeight(36)
+        self.btn_scan.setStyleSheet("""
+            QPushButton {
+                background:#4aa3df;
+                color:white;
+                border-radius:6px;
+            }
+            QPushButton:hover {
+                background:#3b8cc4;
+            }
+        """)
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.btn_camera)
-        buttons.addWidget(self.btn_color)
+        self.btn_scan.clicked.connect(self.toggle)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.video_label)
-        layout.addLayout(buttons)
+        h = QHBoxLayout()
+        h.addStretch()
+        h.addWidget(self.btn_scan)
+        h.addStretch()
 
-        self.setLayout(layout)
+        v = QVBoxLayout(self)
+        v.setSpacing(15)
+        v.addWidget(self.title)
+        v.addWidget(self.video, alignment=Qt.AlignCenter)
+        v.addLayout(h)
 
-        # Timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update)
 
-    def toggle_camera(self):
+    def toggle(self):
         if self.cap is None:
             self.cap = cv2.VideoCapture(0)
             self.timer.start(30)
-            self.btn_camera.setText("Chiudi fotocamera")
+            self.btn_scan.setText("Interrompi scansione")
         else:
             self.timer.stop()
             self.cap.release()
             self.cap = None
-            self.video_label.clear()
-            self.btn_camera.setText("Apri fotocamera")
+            self.video.setPixmap(QPixmap())
+            self.video.setText("In attesa della scansione")
+            self.btn_scan.setText("Avvia scansione")
 
-    def change_color(self):
-        self.color_index = (self.color_index + 1) % len(self.colors)
+    def update(self):
+        ok, f = self.cap.read()
+        if not ok: return
+        g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        for x,y,w,h in self.face.detectMultiScale(g,1.3,5):
+            cv2.circle(f,(x+w//2,y+h//2),w//2,self.color,2)
+        f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
+        h,w,c = f.shape
+        self.video.setPixmap(QPixmap.fromImage(QImage(f.data,w,h,c*w,QImage.Format_RGB888)))
 
-    def update_frame(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            return
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
-
-        for (x, y, w, h) in faces:
-            center = (x + w // 2, y + h // 2)
-            radius = w // 2
-            cv2.circle(
-                frame,
-                center,
-                radius,
-                self.colors[self.color_index],
-                3
-            )
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-        self.video_label.setPixmap(QPixmap.fromImage(img))
-
-    def closeEvent(self, event):
-        if self.cap:
-            self.cap.release()
-        event.accept()
-
+    def closeEvent(self,e):
+        if self.cap: self.cap.release()
+        e.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = FaceApp()
-    window.show()
-    sys.exit(app.exec())
+    try:
+        app = QApplication(sys.argv)
+        w = App()
+        w.show()
+        sys.exit(app.exec())
+    except Exception as e:
+        print("ERRORE:", e)
+        input("Premi INVIO per uscire...")
+
