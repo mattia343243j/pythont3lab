@@ -12,7 +12,7 @@ class App(QWidget):
         QApplication.instance().setFont(QFont("Segoe UI", 10))
 
         self.cap = None
-        self.color = (255, 180, 0)   # azzurro (BGR)
+        self.color = (255, 180, 0)  
         self.face = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
