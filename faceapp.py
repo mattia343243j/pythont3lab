@@ -2,6 +2,8 @@ import sys
 import cv2
 import time
 import os
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QUrl
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
@@ -29,6 +31,10 @@ class App(QWidget):
         self.zoom = 1.0
         self.auto_zoom_face = False
         self.face_zoom_margin = 0.45
+
+        # ===== STATISTICHE =====
+        self.photo_count = 0
+        self.video_count = 0
 
         # ===== FACE COLORS (BGR) =====
         self.face_colors = [
@@ -78,7 +84,7 @@ class App(QWidget):
         self.btn_auto_zoom.setCheckable(True)
         self.btn_auto_zoom.clicked.connect(self.toggle_auto_zoom)
 
-        self.btn_change_color = QPushButton("CAMBIA COLORE RIQUIDRO")
+        self.btn_change_color = QPushButton("CAMBIA COLORE RIQUADRO")
         self.btn_change_color.clicked.connect(self.cycle_face_color)
 
         for b in (self.btn_auto_zoom, self.btn_change_color):
@@ -117,26 +123,63 @@ class App(QWidget):
         """)
         main.addWidget(self.video)
 
+        # ===== STATS PANEL =====
+        self.stats_frame = QFrame()
+        self.stats_frame.setFixedHeight(90)
+        self.stats_frame.setStyleSheet("""
+            QFrame {
+                background:#0d0d0d;
+                border:1px solid #2a2a2a;
+                border-radius:12px;
+            }
+        """)
+
+        stats_layout = QHBoxLayout(self.stats_frame)
+        stats_layout.setContentsMargins(18, 10, 18, 10)
+        stats_layout.setSpacing(30)
+
+        self.lbl_photos = QLabel("FOTO\n0")
+        self.lbl_videos = QLabel("VIDEO\n0")
+        self.lbl_storage = QLabel("MEMORIA\n0 MB")
+
+        for lbl in (self.lbl_photos, self.lbl_videos, self.lbl_storage):
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("""
+                QLabel {
+                    color:#e6e6e6;
+                    font-size:12px;
+                    font-weight:600;
+                }
+            """)
+
+        stats_layout.addWidget(self.lbl_photos)
+        stats_layout.addWidget(self.lbl_videos)
+        stats_layout.addWidget(self.lbl_storage)
+        main.addWidget(self.stats_frame)
+
         # ===== CONTROLS =====
         controls = QHBoxLayout()
         controls.setSpacing(18)
 
-        self.btn_scan = QPushButton("Avvia scansione")
+        self.btn_scan = QPushButton("Attiva Fotocamera")
         self.btn_photo = QPushButton("Scatta foto")
         self.btn_record = QPushButton("Registra video")
+        self.btn_open_photos = QPushButton("Apri Foto Salvate")
+        self.btn_open_photos.clicked.connect(self.open_photos_folder)
 
-        for b in (self.btn_scan, self.btn_photo, self.btn_record):
+        for b in (self.btn_scan, self.btn_photo, self.btn_record, self.btn_open_photos):
             b.setStyleSheet("""
                 QPushButton {
-                    background:#242424;
-                    color:#e6e6e6;
+                    background:#ff0000;
+                    color:#ffffff;
                     border:1px solid #333;
                     border-radius:6px;
                     padding:10px 24px;
                     font-size:13px;
+                    font-weight:bold;
                 }
                 QPushButton:hover {
-                    background:#2f2f2f;
+                    background:#00ff00;
                 }
             """)
 
@@ -147,16 +190,41 @@ class App(QWidget):
         controls.addWidget(self.btn_scan)
         controls.addWidget(self.btn_photo)
         controls.addWidget(self.btn_record)
+        controls.addWidget(self.btn_open_photos)
         main.addLayout(controls)
 
         # ===== TIMER =====
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
 
+        self.update_stats()
+
     # ================= LOGICA =================
+
+    def update_stats(self):
+        foto_files = os.listdir("foto")
+        video_files = os.listdir("video")
+
+        self.photo_count = len(foto_files)
+        self.video_count = len(video_files)
+
+        size = 0
+        for folder in ("foto", "video"):
+            for f in os.listdir(folder):
+                size += os.path.getsize(os.path.join(folder, f))
+
+        size_mb = size / (1024 * 1024)
+
+        self.lbl_photos.setText(f"FOTO\n{self.photo_count}")
+        self.lbl_videos.setText(f"VIDEO\n{self.video_count}")
+        self.lbl_storage.setText(f"MEMORIA\n{size_mb:.2f} MB")
 
     def set_zoom(self, value):
         self.zoom = value / 10.0
+
+    def open_photos_folder(self):
+        folder_path = os.path.abspath("foto")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder_path))
 
     def cycle_face_color(self):
         self.face_color_index = (self.face_color_index + 1) % len(self.face_colors)
@@ -168,13 +236,13 @@ class App(QWidget):
         if self.cap is None:
             self.cap = cv2.VideoCapture(0)
             self.timer.start(30)
-            self.btn_scan.setText("Ferma scansione")
+            self.btn_scan.setText("Chiudi Fotocamera")
         else:
             self.timer.stop()
             self.cap.release()
             self.cap = None
             self.video.setText("Camera inattiva")
-            self.btn_scan.setText("Avvia scansione")
+            self.btn_scan.setText("Attiva Fotocamera")
 
     def update_frame(self):
         if self.cap is None or not self.cap.isOpened():
@@ -210,7 +278,6 @@ class App(QWidget):
             for x, y, fw, fh in faces:
                 cv2.rectangle(frame, (x, y), (x + fw, y + fh), color, 2)
 
-        # ===== BOLLINO ROSSO REC =====
         if self.recording:
             cv2.circle(frame, (24, 24), 8, (0, 0, 255), -1)
             cv2.putText(frame, "REC", (40, 30),
@@ -231,7 +298,11 @@ class App(QWidget):
 
     def take_photo(self):
         if self.last_frame is not None:
-            cv2.imwrite(f"foto/foto_{time.strftime('%Y%m%d_%H%M%S')}.jpg", self.last_frame)
+            cv2.imwrite(
+                f"foto/foto_{time.strftime('%Y%m%d_%H%M%S')}.jpg",
+                self.last_frame
+            )
+            self.update_stats()
 
     def toggle_recording(self):
         if self.cap is None:
@@ -252,7 +323,6 @@ class App(QWidget):
 
             self.recording = True
             self.btn_record.setText("Stop video")
-
         else:
             self.recording = False
             self.btn_record.setText("Registra video")
@@ -260,6 +330,8 @@ class App(QWidget):
             if self.video_writer:
                 self.video_writer.release()
                 self.video_writer = None
+
+            self.update_stats()
 
 
 if __name__ == "__main__":
