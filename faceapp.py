@@ -51,7 +51,7 @@ class FaceAccessApp(QWidget):
             (0, 255, 0), (255, 0, 0), (0, 0, 255),
             (0, 255, 255), (255, 255, 0), (255, 0, 255),
             (255, 255, 255), (0, 165, 255)
-        ]
+        ]   
         self.face_color_index = 0
 
         # Face detector
