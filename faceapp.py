@@ -2,7 +2,7 @@ import sys
 import os
 import time
 import cv2
-import numpy as np
+import requests       
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QSlider, QFrame,
@@ -10,17 +10,41 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QTimer, Qt, QUrl
 from PyQt6.QtGui import QImage, QPixmap, QFont, QDesktopServices
-
-
 class FaceAccessApp(QWidget):
+
+
+
+    def open_log_file(self):
+        log_path = os.path.join(os.getcwd(), "registro_eventi.txt")
+
+    
+        if not os.path.exists(log_path):
+            with open(log_path, "w", encoding="utf-8"):
+                pass
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(log_path))
+
+
+    def write_log(self, message):
+        log_path = os.path.join(os.getcwd(), "registro_eventi.txt")
+
+        now = time.strftime("%d/%m/%Y %H:%M:%S")
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{now} - {self.city_name} - {message}\n")
+
     def __init__(self):
         super().__init__()
+
+        # ── Variabili di geolocalizzazione via IP ───────────────
+        self.city_name = "Località sconosciuta"
+        self.last_geo_update = 0
+        self.geo_update_interval = 60  # aggiorna ogni 60 secondi
+
         self.setWindowTitle("Accesso Biometrico")
         self.resize(1020, 900)
 
-        # =====================================
-        #  VARIABILI DI STATO
-        # =====================================
+        # Variabili di stato
         self.cap = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
@@ -29,13 +53,14 @@ class FaceAccessApp(QWidget):
         self.prev_gray = None
 
         self.recording = False
+        self.motion_recording = False
         self.video_writer = None
+        self.last_motion_time = 0.0
 
         self.motion_enabled = False
-        self.motion_start_time = None
-        self.motion_threshold = 5.0
+        self.motion_threshold = 25
         self.motion_area_threshold = 5000
-        self.max_motion_duration = 5  # secondi
+        self.max_motion_duration = 5.0  # secondi di inattività prima di fermare
 
         self.zoom = 1.0
         self.auto_zoom_face = False
@@ -51,7 +76,7 @@ class FaceAccessApp(QWidget):
             (0, 255, 0), (255, 0, 0), (0, 0, 255),
             (0, 255, 255), (255, 255, 0), (255, 0, 255),
             (255, 255, 255), (0, 165, 255)
-        ]   
+        ]
         self.face_color_index = 0
 
         # Face detector
@@ -59,10 +84,38 @@ class FaceAccessApp(QWidget):
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
 
+        if self.face_cascade.empty():
+            print("errore , non va ")
+
         self.init_ui()
         self.update_stats()
 
+    def update_city_from_ip(self):
+       
+
+        try:
+            r = requests.get("http://ip-api.com/json/", timeout=6)
+            r.raise_for_status()
+            data = r.json()
+
+            if data.get("status") == "success":
+                city = data.get("city") or ""
+                region = data.get("regionName") or ""
+                country = data.get("country") or ""
+
+                parts = [p for p in [city, region, country] if p and p.strip()]
+                if parts:
+                    self.city_name = ", ".join(parts)
+                else:
+                    self.city_name = "Località sconosciuta"
+            else:
+                self.city_name = "Località sconosciuta"
+
+        except Exception:
+            self.city_name = "Località sconosciuta"   # fallisce silenziosamente
+
     def init_ui(self):
+
         self.setStyleSheet("""
             QWidget {
                 background-color: #0f1115;
@@ -77,14 +130,9 @@ class FaceAccessApp(QWidget):
             }
             QPushButton:hover { background-color: #222632; }
             QPushButton:pressed { background-color: #2d3242; }
-            QPushButton:checked {
-                background-color: #0f2a33;
-                border-color: #5bc0de;
-                color: #5bc0de;
-            }
             QComboBox {
                 background-color: #1a1d24;
-                border: 1px solid #2a2f3a;
+                border: 1px solid #2a2f3a; 
                 border-radius: 8px;
                 padding: 6px;
             }
@@ -96,7 +144,7 @@ class FaceAccessApp(QWidget):
             QSlider::handle:horizontal {
                 background: #5bc0de;
                 width: 16px;
-                height: 16px;
+                height: 16px; 
                 margin: -5px 0;
                 border-radius: 8px;
             }
@@ -105,18 +153,17 @@ class FaceAccessApp(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(16)
 
-        # ====================
-        #   AREA CENTRALE
-        # ====================
+
+        # ── AREA CENTRALE ───────────────────────────────────────
         center_layout = QHBoxLayout()
         center_layout.setSpacing(20)
 
-        # Controlli sinistra
+        # Pannello sinistro comandi
         left_panel = QVBoxLayout()
         left_panel.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setRange(10, 35)
+        self.zoom_slider.setRange(10, 40)
         self.zoom_slider.setValue(10)
         self.zoom_slider.setFixedWidth(280)
         self.zoom_slider.valueChanged.connect(self.set_zoom)
@@ -134,7 +181,7 @@ class FaceAccessApp(QWidget):
 
         self.btn_motion = QPushButton("Motion Record")
         self.btn_motion.setCheckable(True)
-        self.btn_motion.clicked.connect(self.toggle_motion)
+        self.btn_motion.clicked.connect(self.toggle_motion_detection)
 
         for btn in (self.btn_auto_zoom, self.btn_invert, self.btn_color, self.btn_motion):
             btn.setStyleSheet("""
@@ -156,7 +203,7 @@ class FaceAccessApp(QWidget):
         left_panel.addWidget(self.btn_motion)
         left_panel.addStretch()
 
-        # Video area (centro-destra)
+        # Area video
         self.video_label = QLabel("Camera inattiva")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumSize(640, 480)
@@ -173,12 +220,9 @@ class FaceAccessApp(QWidget):
 
         center_layout.addLayout(left_panel, 1)
         center_layout.addWidget(self.video_label, 3)
-
         main_layout.addLayout(center_layout)
 
-        # ====================
-        #   STATISTICHE
-        # ====================
+        # ── STATISTICHE ──────────────────────────────────────────
         stats_frame = QFrame()
         stats_frame.setFixedHeight(90)
         stats_frame.setStyleSheet("""
@@ -210,40 +254,39 @@ class FaceAccessApp(QWidget):
 
         main_layout.addWidget(stats_frame)
 
-        # ====================
-        #   PULSANTI AZIONI
-        # ====================
+        # ── PULSANTI AZIONI ─────────────────────────────────────
         actions = QHBoxLayout()
         actions.setSpacing(12)
 
-        self.btn_scan = QPushButton("Attiva Fotocamera")
-        self.btn_photo = QPushButton("Scatta foto")
+        self.btn_scan   = QPushButton("Attiva Fotocamera")
+        self.btn_photo  = QPushButton("Scatta foto")
         self.btn_record = QPushButton("Registra video")
 
         self.btn_scan.clicked.connect(self.toggle_camera)
         self.btn_photo.clicked.connect(self.take_photo)
-        self.btn_record.clicked.connect(self.toggle_recording)
+        self.btn_record.clicked.connect(self.toggle_manual_recording)
 
         actions.addWidget(self.btn_scan)
         actions.addWidget(self.btn_photo)
         actions.addWidget(self.btn_record)
         main_layout.addLayout(actions)
 
-        # ====================
-        #   STRUMENTI
-        # ====================
+        # ── STRUMENTI ────────────────────────────────────────────
         tools = QHBoxLayout()
         tools.setSpacing(12)
 
-        self.btn_photo_dir = QPushButton("Scegli cartella foto")
-        self.btn_video_dir = QPushButton("Scegli cartella video")
+        self.btn_photo_dir   = QPushButton("Scegli cartella foto")
+        self.btn_video_dir   = QPushButton("Scegli cartella video")
         self.btn_open_photos = QPushButton("Apri foto salvate")
         self.btn_open_videos = QPushButton("Apri video salvati")
+        self.btn_open_log = QPushButton("Apri registro eventi") 
+
 
         self.btn_photo_dir.clicked.connect(self.choose_photo_dir)
         self.btn_video_dir.clicked.connect(self.choose_video_dir)
         self.btn_open_photos.clicked.connect(self.open_photos_folder)
         self.btn_open_videos.clicked.connect(self.open_videos_folder)
+        self.btn_open_log.clicked.connect(self.open_log_file)
 
         self.camera_combo = QComboBox()
         self.camera_combo.setFixedWidth(180)
@@ -253,13 +296,14 @@ class FaceAccessApp(QWidget):
         tools.addWidget(self.btn_video_dir)
         tools.addWidget(self.btn_open_photos)
         tools.addWidget(self.btn_open_videos)
+        tools.addWidget(self.btn_open_log)
         tools.addWidget(self.camera_combo)
 
         main_layout.addLayout(tools)
 
-    # =====================================
-    #   METODI DI SUPPORTO
-    # =====================================
+    # ────────────────────────────────────────────────────────────────
+    # Metodi di supporto
+    # ────────────────────────────────────────────────────────────────
 
     def refresh_cameras(self):
         self.camera_combo.clear()
@@ -269,33 +313,38 @@ class FaceAccessApp(QWidget):
         if cameras:
             self.camera_combo.setCurrentIndex(0)
 
-    def detect_cameras(self, max_index=8):
+    def detect_cameras(self, max_index=10):
         cams = []
         for i in range(max_index):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 cams.append(i)
-                cap.release()
+            cap.release()
         return cams
 
     def toggle_camera(self):
-        if self.cap is None or not self.cap.isOpened():
-            idx = self.camera_combo.currentData()
-            if idx is None:
-                return
-            self.cap = cv2.VideoCapture(idx)
-            if not self.cap.isOpened():
-                self.video_label.setText("Errore: impossibile aprire la camera")
-                return
-            self.timer.start(33)  # ~30 fps
-            self.btn_scan.setText("Chiudi Fotocamera")
-            self.video_label.setText("")
-        else:
+        if self.cap is not None and self.cap.isOpened():
             self.timer.stop()
             self.cap.release()
             self.cap = None
             self.video_label.setText("Camera inattiva")
             self.btn_scan.setText("Attiva Fotocamera")
+            if self.recording:
+                self._stop_recording()
+        else:
+            idx = self.camera_combo.currentData()
+            if idx is None:
+                self.video_label.setText("Nessuna camera selezionata")
+                return
+
+            self.cap = cv2.VideoCapture(idx)
+            if not self.cap.isOpened():
+                self.video_label.setText("Errore: impossibile aprire la camera")
+                return
+
+            self.timer.start(33)  # ~30 fps
+            self.btn_scan.setText("Chiudi Fotocamera")
+            self.video_label.setText("")
 
     def update_frame(self):
         if self.cap is None or not self.cap.isOpened():
@@ -315,24 +364,32 @@ class FaceAccessApp(QWidget):
 
         display_frame = frame.copy()
 
-        # Motion detection
+        # ── Motion Detection ────────────────────────────────
         if self.motion_enabled:
             if self.prev_gray is None:
                 self.prev_gray = gray
             else:
                 delta = cv2.absdiff(self.prev_gray, gray)
-                thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
+                thresh = cv2.threshold(delta, self.motion_threshold, 255, cv2.THRESH_BINARY)[1]
                 thresh = cv2.dilate(thresh, None, iterations=2)
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 motion_detected = any(cv2.contourArea(c) > self.motion_area_threshold for c in contours)
 
-                if motion_detected and not self.recording:
-                    self.start_motion_recording()
+                current_time = time.time()
 
-                self.prev_gray = gray
+                if motion_detected:
+                    self.last_motion_time = current_time
 
-        # Auto-zoom viso
+                if not self.recording and motion_detected:
+                    self.start_recording(motion_mode=True)
+
+                if self.motion_recording and (current_time - self.last_motion_time > self.max_motion_duration):
+                    self._stop_recording()
+
+            self.prev_gray = gray.copy()
+
+        # ── Auto-zoom viso ──────────────────────────────────
         if self.auto_zoom_face and len(faces) > 0:
             x, y, fw, fh = max(faces, key=lambda f: f[2]*f[3])
             margin = int(fw * self.face_zoom_margin)
@@ -341,45 +398,73 @@ class FaceAccessApp(QWidget):
                 max(0, x-margin):x+fw+margin
             ]
             if crop.size > 0:
-                display_frame = cv2.resize(crop, (w, h))
+                display_frame = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        # Zoom manuale
+        # ── Zoom manuale ────────────────────────────────────
         elif self.zoom > 1.0:
             nw, nh = int(w / self.zoom), int(h / self.zoom)
             x1 = (w - nw) // 2
             y1 = (h - nh) // 2
             cropped = display_frame[y1:y1+nh, x1:x1+nw]
-            display_frame = cv2.resize(cropped, (w, h))
+            if cropped.size > 0:
+                display_frame = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        # Disegna rettangoli visi
+        # ── Disegna rettangoli visi ─────────────────────────
         color = self.face_colors[self.face_color_index]
         for (x, y, fw, fh) in faces:
             cv2.rectangle(display_frame, (x, y), (x+fw, y+fh), color, 2)
 
-        # Indicatore registrazione
+        # ── Indicatore registrazione ────────────────────────
         if self.recording:
             cv2.circle(display_frame, (24, 24), 8, (0, 0, 255), -1)
             cv2.putText(display_frame, "REC", (40, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Inversione colori
+        # ── Inversione colori ───────────────────────────────
         if self.invert_colors:
             display_frame = cv2.bitwise_not(display_frame)
 
-        # Salva frame per foto e registrazione
+        # ── Aggiornamento località via IP ───────────────────
+        current_time = time.time()
+        if current_time - self.last_geo_update > self.geo_update_interval:
+            self.update_city_from_ip()
+            self.last_geo_update = current_time
+
+        # ── Overlay testo ───────────────────────────────────
+        now = time.strftime("%d/%m/%Y %H:%M:%S")
+
+        cv2.putText(display_frame, now,
+                    (20, h - 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2)
+
+        cv2.putText(display_frame, f"📍 {self.city_name}",
+                    (20, h - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 255),
+                    2)
+
         self.last_frame = display_frame.copy()
 
-        if self.video_writer is not None:
+        if self.video_writer is not None and self.recording:
             self.video_writer.write(display_frame)
 
-        # Mostra
         self.show_frame(display_frame)
 
     def show_frame(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
-        self.video_label.setPixmap(QPixmap.fromImage(qimg))
+        bytes_per_line = ch * w
+        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+        self.video_label.setPixmap(pixmap.scaled(
+            self.video_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        ))
 
     def set_zoom(self, value):
         self.zoom = value / 10.0
@@ -393,55 +478,77 @@ class FaceAccessApp(QWidget):
     def cycle_face_color(self):
         self.face_color_index = (self.face_color_index + 1) % len(self.face_colors)
 
-    def toggle_motion(self):
+    def toggle_motion_detection(self):
         self.motion_enabled = self.btn_motion.isChecked()
         if not self.motion_enabled:
             self.prev_gray = None
+            if self.motion_recording:
+                self._stop_recording()
 
-    def start_motion_recording(self):
+    def start_recording(self, motion_mode=False):
+
         if self.cap is None or not self.cap.isOpened():
             return
 
-        filename = os.path.join(self.video_dir, f"motion_{time.strftime('%Y%m%d_%H%M%S')}.avi")
+        prefix = "motion" if motion_mode else "video"
+        filename = os.path.join(
+            self.video_dir,
+            f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.avi"
+        )
+
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        self.video_writer = cv2.VideoWriter(
-            filename, cv2.VideoWriter_fourcc(*"MJPG"), 30, (w, h)
-        )
-        self.recording = True
-        self.motion_start_time = time.time()
-        self.btn_record.setText("Stop (motion)")
+        fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        self.video_writer = cv2.VideoWriter(filename, fourcc, 25.0, (w, h))
 
-    def toggle_recording(self):
+        if not self.video_writer.isOpened():
+            print("Errore: impossibile creare il VideoWriter")
+            return
+
+        self.recording = True
+        self.write_log(f" Inizio registrazione: {os.path.basename(filename)}")
+
+        self.motion_recording = motion_mode
+        self.last_motion_time = time.time()
+
+        if motion_mode:
+            self.btn_record.setText("Stop (motion)")
+        else:
+            self.btn_record.setText("Stop video")
+
+    def toggle_manual_recording(self):
         if self.cap is None or not self.cap.isOpened():
             return
 
         if not self.recording:
-            filename = os.path.join(self.video_dir, f"video_{time.strftime('%Y%m%d_%H%M%S')}.avi")
-            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-            self.video_writer = cv2.VideoWriter(
-                filename, cv2.VideoWriter_fourcc(*"MJPG"), 30, (w, h)
-            )
-            self.recording = True
-            self.btn_record.setText("Stop video")
+            self.start_recording(motion_mode=False)
         else:
             self._stop_recording()
 
     def _stop_recording(self):
         self.recording = False
+        self.motion_recording = False
+        self.last_motion_time = 0.0
+        self.write_log(" Registrazione terminata")
+
+
         self.btn_record.setText("Registra video")
+
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
+
         self.update_stats()
 
     def take_photo(self):
         if self.last_frame is not None:
-            path = os.path.join(self.photo_dir, f"foto_{time.strftime('%Y%m%d_%H%M%S')}.jpg")
+            filename = f"foto_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+            path = os.path.join(self.photo_dir, filename)
             cv2.imwrite(path, self.last_frame)
+
+            self.write_log(f" Foto scattata: {filename}")
+
             self.update_stats()
 
     def choose_photo_dir(self):
@@ -461,8 +568,8 @@ class FaceAccessApp(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.video_dir))
 
     def update_stats(self):
-        photo_count = len(os.listdir(self.photo_dir))
-        video_count = len(os.listdir(self.video_dir))
+        photo_count = len([f for f in os.listdir(self.photo_dir) if f.lower().endswith(('.jpg','.jpeg','.png'))])
+        video_count = len([f for f in os.listdir(self.video_dir) if f.lower().endswith(('.avi','.mp4'))])
 
         total_size = 0
         for folder in (self.photo_dir, self.video_dir):
@@ -479,6 +586,9 @@ class FaceAccessApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
+    
     window = FaceAccessApp()
+    
     window.show()
+
     sys.exit(app.exec())
