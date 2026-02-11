@@ -301,9 +301,7 @@ class FaceAccessApp(QWidget):
 
         main_layout.addLayout(tools)
 
-    # ────────────────────────────────────────────────────────────────
-    # Metodi di supporto
-    # ────────────────────────────────────────────────────────────────
+    
 
     def refresh_cameras(self):
         self.camera_combo.clear()
