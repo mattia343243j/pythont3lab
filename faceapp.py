@@ -2,49 +2,57 @@ import sys
 import os
 import time
 import cv2
-import requests       
+import geocoder
+import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QSlider, QFrame,
-    QComboBox, QFileDialog
+    QComboBox, QFileDialog, QLineEdit
 )
 from PyQt6.QtCore import QTimer, Qt, QUrl
 from PyQt6.QtGui import QImage, QPixmap, QFont, QDesktopServices
+
 class FaceAccessApp(QWidget):
-
-
 
     def open_log_file(self):
         log_path = os.path.join(os.getcwd(), "registro_eventi.txt")
-
-    
-        if not os.path.exists(log_path):
-            with open(log_path, "w", encoding="utf-8"):
-                pass
-
+        with open(log_path, "w", encoding="utf-8") as f:
+            pass
         QDesktopServices.openUrl(QUrl.fromLocalFile(log_path))
-
 
     def write_log(self, message):
         log_path = os.path.join(os.getcwd(), "registro_eventi.txt")
-
         now = time.strftime("%d/%m/%Y %H:%M:%S")
-
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{now} - {self.city_name} - {message}\n")
 
     def __init__(self):
         super().__init__()
 
-        # ── Variabili di geolocalizzazione via IP ───────────────
-        self.city_name = "Località sconosciuta"
-        self.last_geo_update = 0
-        self.geo_update_interval = 60  # aggiorna ogni 60 secondi
+        # AKAZE invece di ORB → molto più stabile per oggetti in mano
+        self.detector = cv2.AKAZE_create()
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+
+        self.known_objects = {}                     # nome → des
+        self.known_kp = {}                          # nome → kp
+
+        self.scan_flash = 0
+        self.pending_bbox = None
+
+        # Persistenza nome (sparisce dopo ~1.2 s se oggetto esce)
+        self.current_name = None
+        self.last_good_time = 0
+        self.name_persistence_sec = 1.2
+
+        try:
+            g = geocoder.ip('me')
+            self.city_name = g.city if g.ok and g.city else "Città non rilevata"
+        except Exception:
+            self.city_name = "Bologna"
 
         self.setWindowTitle("Accesso Biometrico")
         self.resize(1020, 900)
 
-        # Variabili di stato
         self.cap = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_frame)
@@ -60,7 +68,7 @@ class FaceAccessApp(QWidget):
         self.motion_enabled = False
         self.motion_threshold = 25
         self.motion_area_threshold = 5000
-        self.max_motion_duration = 5.0  # secondi di inattività prima di fermare
+        self.max_motion_duration = 5.0
 
         self.zoom = 1.0
         self.auto_zoom_face = False
@@ -79,88 +87,48 @@ class FaceAccessApp(QWidget):
         ]
         self.face_color_index = 0
 
-        # Face detector
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
-
         if self.face_cascade.empty():
-            print("errore , non va ")
+            print("Errore: impossibile caricare haarcascade_frontalface_default.xml")
 
         self.init_ui()
         self.update_stats()
 
-    def update_city_from_ip(self):
-       
-
-        try:
-            r = requests.get("http://ip-api.com/json/", timeout=6)
-            r.raise_for_status()
-            data = r.json()
-
-            if data.get("status") == "success":
-                city = data.get("city") or ""
-                region = data.get("regionName") or ""
-                country = data.get("country") or ""
-
-                parts = [p for p in [city, region, country] if p and p.strip()]
-                if parts:
-                    self.city_name = ", ".join(parts)
-                else:
-                    self.city_name = "Località sconosciuta"
-            else:
-                self.city_name = "Località sconosciuta"
-
-        except Exception:
-            self.city_name = "Località sconosciuta"   # fallisce silenziosamente
-
     def init_ui(self):
-
         self.setStyleSheet("""
-            QWidget {
-                background-color: #0f1115;
-                color: #e6e6e6;
-            }
-            QPushButton {
-                background-color: #FF8000;
-                border: 1px solid #2a2f3a;
-                border-radius: 10px;
-                padding: 10px 14px;
-                font-weight: 600;
-            }
+            QWidget { background-color: #0f1115; color: #e6e6e6; }
+            QPushButton { background-color: #FF8000; border: 1px solid #2a2f3a;
+                          border-radius: 10px; padding: 10px 14px; font-weight: 600; }
             QPushButton:hover { background-color: #222632; }
             QPushButton:pressed { background-color: #2d3242; }
-            QComboBox {
-                background-color: #1a1d24;
-                border: 1px solid #2a2f3a; 
-                border-radius: 8px;
-                padding: 6px;
-            }
-            QSlider::groove:horizontal {
-                background: #2a2f3a;
-                height: 6px;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #5bc0de;
-                width: 16px;
-                height: 16px; 
-                margin: -5px 0;
-                border-radius: 8px;
-            }
+            QLineEdit { background-color: #1a1d24; border: 1px solid #2a2f3a;
+                        border-radius: 8px; padding: 6px; color: #e6e6e6; }
+            QComboBox { background-color: #1a1d24; border: 1px solid #2a2f3a;
+                        border-radius: 8px; padding: 6px; }
+            QSlider::groove:horizontal { background: #2a2f3a; height: 6px; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #5bc0de; width: 16px; height: 16px;
+                                         margin: -5px 0; border-radius: 8px; }
         """)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(16)
 
-
-        # ── AREA CENTRALE ───────────────────────────────────────
         center_layout = QHBoxLayout()
         center_layout.setSpacing(20)
 
-        # Pannello sinistro comandi
         left_panel = QVBoxLayout()
         left_panel.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        lbl_oggetto = QLabel("Impara oggetto da scansionare")
+        lbl_oggetto.setStyleSheet("font-weight: bold; color: #5bc0de;")
+        self.object_name_input = QLineEdit()
+        self.object_name_input.setPlaceholderText("es: Telefono, Chiavi, Portafoglio")
+        self.object_name_input.setFixedWidth(280)
+
+        self.btn_learn_object = QPushButton("Impara oggetto (poi scannerizza)")
+        self.btn_learn_object.clicked.connect(self.learn_object)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setRange(10, 40)
@@ -185,17 +153,16 @@ class FaceAccessApp(QWidget):
 
         for btn in (self.btn_auto_zoom, self.btn_invert, self.btn_color, self.btn_motion):
             btn.setStyleSheet("""
-                QPushButton {
-                    background:#141414; color:#8f9aa3;
-                    border:1px solid #2f2f2f; border-radius:600px;
-                    padding:10px 40px;
-                }
+                QPushButton { background:#141414; color:#8f9aa3; border:1px solid #2f2f2f;
+                              border-radius:600px; padding:10px 40px; }
                 QPushButton:hover { background:#1c1c1c; }
-                QPushButton:checked {
-                    background:#0f2a33; color:#5bc0de; border-color:#5bc0de;
-                }
+                QPushButton:checked { background:#0f2a33; color:#5bc0de; border-color:#5bc0de; }
             """)
 
+        left_panel.addWidget(lbl_oggetto)
+        left_panel.addWidget(self.object_name_input)
+        left_panel.addWidget(self.btn_learn_object)
+        left_panel.addSpacing(20)
         left_panel.addWidget(self.zoom_slider)
         left_panel.addWidget(self.btn_auto_zoom)
         left_panel.addWidget(self.btn_invert)
@@ -203,35 +170,21 @@ class FaceAccessApp(QWidget):
         left_panel.addWidget(self.btn_motion)
         left_panel.addStretch()
 
-        # Area video
         self.video_label = QLabel("Camera inattiva")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setStyleSheet("""
-            QLabel {
-                background-color: #000;
-                border: 1px solid #2a2f3a;
-                border-radius: 24px;
-                color: #aaa;
-                font-size: 18px;
-                font-weight: 600;
-            }
+            QLabel { background-color: #000; border: 1px solid #2a2f3a; border-radius: 24px;
+                     color: #aaa; font-size: 18px; font-weight: 600; }
         """)
 
         center_layout.addLayout(left_panel, 1)
         center_layout.addWidget(self.video_label, 3)
         main_layout.addLayout(center_layout)
 
-        # ── STATISTICHE ──────────────────────────────────────────
         stats_frame = QFrame()
         stats_frame.setFixedHeight(90)
-        stats_frame.setStyleSheet("""
-            QFrame {
-                background-color: #151821;
-                border: 1px solid #232836;
-                border-radius: 16px;
-            }
-        """)
+        stats_frame.setStyleSheet("QFrame { background-color: #151821; border: 1px solid #232836; border-radius: 16px; }")
         stats_layout = QHBoxLayout(stats_frame)
         stats_layout.setContentsMargins(18, 10, 18, 10)
         stats_layout.setSpacing(30)
@@ -242,19 +195,13 @@ class FaceAccessApp(QWidget):
 
         for lbl in (self.lbl_photos, self.lbl_videos, self.lbl_storage):
             lbl.setStyleSheet("""
-                QLabel {
-                    background-color: #0f1115;
-                    border-radius: 10px;
-                    padding: 10px;
-                    font-size: 14px;
-                    font-weight: 600;
-                }
+                QLabel { background-color: #0f1115; border-radius: 10px; padding: 10px;
+                         font-size: 14px; font-weight: 600; }
             """)
             stats_layout.addWidget(lbl)
 
         main_layout.addWidget(stats_frame)
 
-        # ── PULSANTI AZIONI ─────────────────────────────────────
         actions = QHBoxLayout()
         actions.setSpacing(12)
 
@@ -271,7 +218,6 @@ class FaceAccessApp(QWidget):
         actions.addWidget(self.btn_record)
         main_layout.addLayout(actions)
 
-        # ── STRUMENTI ────────────────────────────────────────────
         tools = QHBoxLayout()
         tools.setSpacing(12)
 
@@ -279,8 +225,7 @@ class FaceAccessApp(QWidget):
         self.btn_video_dir   = QPushButton("Scegli cartella video")
         self.btn_open_photos = QPushButton("Apri foto salvate")
         self.btn_open_videos = QPushButton("Apri video salvati")
-        self.btn_open_log = QPushButton("Apri registro eventi") 
-
+        self.btn_open_log    = QPushButton("Apri registro eventi")
 
         self.btn_photo_dir.clicked.connect(self.choose_photo_dir)
         self.btn_video_dir.clicked.connect(self.choose_video_dir)
@@ -301,7 +246,28 @@ class FaceAccessApp(QWidget):
 
         main_layout.addLayout(tools)
 
-    
+    def learn_object(self):
+        if self.last_frame is None:
+            print("Nessun frame disponibile per imparare l'oggetto")
+            return
+
+        name = self.object_name_input.text().strip()
+        if not name:
+            print("Inserisci un nome per l'oggetto")
+            return
+
+        gray = cv2.cvtColor(self.last_frame, cv2.COLOR_BGR2GRAY)
+        kp, des = self.detector.detectAndCompute(gray, None)
+
+        if des is None or len(des) < 100:
+            print(f"Non abbastanza feature rilevati per '{name}' – riprova")
+            return
+
+        self.known_objects[name] = des
+        self.known_kp[name] = kp
+        print(f"Oggetto '{name}' imparato con successo ({len(des)} descrittori)")
+        self.object_name_input.clear()
+        self.pending_bbox = None
 
     def refresh_cameras(self):
         self.camera_combo.clear()
@@ -325,6 +291,7 @@ class FaceAccessApp(QWidget):
             self.timer.stop()
             self.cap.release()
             self.cap = None
+            self.prev_gray = None
             self.video_label.setText("Camera inattiva")
             self.btn_scan.setText("Attiva Fotocamera")
             if self.recording:
@@ -340,9 +307,10 @@ class FaceAccessApp(QWidget):
                 self.video_label.setText("Errore: impossibile aprire la camera")
                 return
 
-            self.timer.start(33)  # ~30 fps
+            self.timer.start(33)
             self.btn_scan.setText("Chiudi Fotocamera")
             self.video_label.setText("")
+            self.prev_gray = None
 
     def update_frame(self):
         if self.cap is None or not self.cap.isOpened():
@@ -356,25 +324,87 @@ class FaceAccessApp(QWidget):
         h, w = frame.shape[:2]
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+        gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
 
-        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
+        faces = self.face_cascade.detectMultiScale(gray_blur, 1.3, 5)
 
         display_frame = frame.copy()
 
-        # ── Motion Detection ────────────────────────────────
+        kp_scene, des_scene = self.detector.detectAndCompute(gray, None)
+
+        recognized_name = None
+        best_good_matches = 0
+
+        if des_scene is not None and len(des_scene) > 80 and self.known_objects:
+            for name, des_obj in self.known_objects.items():
+                try:
+                    matches = self.matcher.knnMatch(des_obj, des_scene, k=2)
+                except Exception as e:
+                    print(f"Errore matcher con {name}: {e}")
+                    continue
+
+                good = [m for m, n in matches if m.distance < 0.75 * n.distance]
+
+                if len(good) > best_good_matches:
+                    best_good_matches = len(good)
+                    recognized_name = name
+
+        now = time.time()
+
+        # Persistenza: nome sparisce dopo 1.2 secondi se non più rilevato
+        if recognized_name is not None and best_good_matches >= 15:
+            self.current_name = recognized_name
+            self.last_good_time = now
+        elif now - self.last_good_time > self.name_persistence_sec:
+            self.current_name = None
+
+        # Riquadro centrale fisso
+        center_x = w // 2
+        center_y = h // 2
+        box_w = int(w * 0.60)
+        box_h = int(h * 0.60)
+        x1 = center_x - box_w // 2
+        y1 = center_y - box_h // 2
+        x2 = center_x + box_w // 2
+        y2 = center_y + box_h // 2
+
+        self.scan_flash = (self.scan_flash + 1) % 20
+
+        text = ""
+        text_color = (180, 180, 180)
+        color = (80, 80, 80)
+        show_text = False
+
+        if self.current_name is not None:
+            color = (0, 220, 0) if self.scan_flash < 10 else (100, 255, 140)
+            text = self.current_name.upper()
+            text_color = (0, 255, 100)
+            show_text = True
+        elif kp_scene is not None and len(kp_scene) > 150:
+            color = (0, 180, 255) if self.scan_flash < 10 else (0, 120, 255)
+            text = "NUOVO OGGETTO – Nomina!"
+            text_color = (0, 180, 255)
+            show_text = True
+
+        cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+
+        if show_text:
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+            text_x = center_x - text_size[0] // 2
+            text_y = y1 - 20 if y1 - 20 > 30 else y1 + box_h + 40
+            cv2.putText(display_frame, text, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2, cv2.LINE_AA)
+
+        # Motion Detection 
         if self.motion_enabled:
-            if self.prev_gray is None:
-                self.prev_gray = gray
-            else:
-                delta = cv2.absdiff(self.prev_gray, gray)
+            current_time = time.time()
+            if self.prev_gray is not None:
+                delta = cv2.absdiff(self.prev_gray, gray_blur)
                 thresh = cv2.threshold(delta, self.motion_threshold, 255, cv2.THRESH_BINARY)[1]
                 thresh = cv2.dilate(thresh, None, iterations=2)
                 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 motion_detected = any(cv2.contourArea(c) > self.motion_area_threshold for c in contours)
-
-                current_time = time.time()
 
                 if motion_detected:
                     self.last_motion_time = current_time
@@ -385,65 +415,43 @@ class FaceAccessApp(QWidget):
                 if self.motion_recording and (current_time - self.last_motion_time > self.max_motion_duration):
                     self._stop_recording()
 
-            self.prev_gray = gray.copy()
+            self.prev_gray = gray_blur.copy()
+        else:
+            self.prev_gray = None
 
-        # ── Auto-zoom viso ──────────────────────────────────
+        # Auto-zoom viso 
         if self.auto_zoom_face and len(faces) > 0:
             x, y, fw, fh = max(faces, key=lambda f: f[2]*f[3])
             margin = int(fw * self.face_zoom_margin)
-            crop = display_frame[
-                max(0, y-margin):y+fh+margin,
-                max(0, x-margin):x+fw+margin
-            ]
+            crop = display_frame[max(0, y-margin):y+fh+margin, max(0, x-margin):x+fw+margin]
             if crop.size > 0:
                 display_frame = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        # ── Zoom manuale ────────────────────────────────────
+        # Zoom manuale 
         elif self.zoom > 1.0:
             nw, nh = int(w / self.zoom), int(h / self.zoom)
-            x1 = (w - nw) // 2
-            y1 = (h - nh) // 2
-            cropped = display_frame[y1:y1+nh, x1:x1+nw]
+            x1z = (w - nw) // 2
+            y1z = (h - nh) // 2
+            cropped = display_frame[y1z:y1z+nh, x1z:x1z+nw]
             if cropped.size > 0:
                 display_frame = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        # ── Disegna rettangoli visi ─────────────────────────
-        color = self.face_colors[self.face_color_index]
+        # Disegna rettangoli visi 
+        color_face = self.face_colors[self.face_color_index]
         for (x, y, fw, fh) in faces:
-            cv2.rectangle(display_frame, (x, y), (x+fw, y+fh), color, 2)
+            cv2.rectangle(display_frame, (x, y), (x+fw, y+fh), color_face, 2)
 
-        # ── Indicatore registrazione ────────────────────────
         if self.recording:
             cv2.circle(display_frame, (24, 24), 8, (0, 0, 255), -1)
             cv2.putText(display_frame, "REC", (40, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # ── Inversione colori ───────────────────────────────
         if self.invert_colors:
             display_frame = cv2.bitwise_not(display_frame)
 
-        # ── Aggiornamento località via IP ───────────────────
-        current_time = time.time()
-        if current_time - self.last_geo_update > self.geo_update_interval:
-            self.update_city_from_ip()
-            self.last_geo_update = current_time
-
-        # ── Overlay testo ───────────────────────────────────
-        now = time.strftime("%d/%m/%Y %H:%M:%S")
-
-        cv2.putText(display_frame, now,
-                    (20, h - 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 255),
-                    2)
-
-        cv2.putText(display_frame, f"📍 {self.city_name}",
-                    (20, h - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 255),
-                    2)
+        now_str = time.strftime("%d/%m/%Y %H:%M:%S")
+        cv2.putText(display_frame, now_str, (20, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(display_frame, f"📍 {self.city_name}", (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         self.last_frame = display_frame.copy()
 
@@ -482,43 +490,34 @@ class FaceAccessApp(QWidget):
             self.prev_gray = None
             if self.motion_recording:
                 self._stop_recording()
+        else:
+            self.prev_gray = None
 
     def start_recording(self, motion_mode=False):
-
         if self.cap is None or not self.cap.isOpened():
             return
 
         prefix = "motion" if motion_mode else "video"
-        filename = os.path.join(
-            self.video_dir,
-            f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.avi"
-        )
-
+        filename = os.path.join(self.video_dir, f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.avi")
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
         fourcc = cv2.VideoWriter_fourcc(*"XVID")
         self.video_writer = cv2.VideoWriter(filename, fourcc, 25.0, (w, h))
 
         if not self.video_writer.isOpened():
-            print("Errore: impossibile creare il VideoWriter")
+            print("Errore: impossibile creare VideoWriter")
             return
 
         self.recording = True
-        self.write_log(f" Inizio registrazione: {os.path.basename(filename)}")
-
+        self.write_log(f"Inizio registrazione: {os.path.basename(filename)}")
         self.motion_recording = motion_mode
         self.last_motion_time = time.time()
 
-        if motion_mode:
-            self.btn_record.setText("Stop (motion)")
-        else:
-            self.btn_record.setText("Stop video")
+        self.btn_record.setText("Stop (motion)" if motion_mode else "Stop video")
 
     def toggle_manual_recording(self):
         if self.cap is None or not self.cap.isOpened():
             return
-
         if not self.recording:
             self.start_recording(motion_mode=False)
         else:
@@ -528,15 +527,11 @@ class FaceAccessApp(QWidget):
         self.recording = False
         self.motion_recording = False
         self.last_motion_time = 0.0
-        self.write_log(" Registrazione terminata")
-
-
+        self.write_log("Registrazione terminata")
         self.btn_record.setText("Registra video")
-
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
-
         self.update_stats()
 
     def take_photo(self):
@@ -544,9 +539,7 @@ class FaceAccessApp(QWidget):
             filename = f"foto_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
             path = os.path.join(self.photo_dir, filename)
             cv2.imwrite(path, self.last_frame)
-
-            self.write_log(f" Foto scattata: {filename}")
-
+            self.write_log(f"Foto scattata: {filename}")
             self.update_stats()
 
     def choose_photo_dir(self):
@@ -569,13 +562,11 @@ class FaceAccessApp(QWidget):
         photo_count = len([f for f in os.listdir(self.photo_dir) if f.lower().endswith(('.jpg','.jpeg','.png'))])
         video_count = len([f for f in os.listdir(self.video_dir) if f.lower().endswith(('.avi','.mp4'))])
 
-        total_size = 0
-        for folder in (self.photo_dir, self.video_dir):
-            for fname in os.listdir(folder):
-                total_size += os.path.getsize(os.path.join(folder, fname))
+        total_size = sum(os.path.getsize(os.path.join(folder, fname))
+                         for folder in (self.photo_dir, self.video_dir)
+                         for fname in os.listdir(folder))
 
         size_mb = total_size / (1024 * 1024)
-
         self.lbl_photos.setText(f"FOTO\n{photo_count}")
         self.lbl_videos.setText(f"VIDEO\n{video_count}")
         self.lbl_storage.setText(f"MEMORIA\n{size_mb:.1f} MB")
@@ -584,9 +575,6 @@ class FaceAccessApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-    
     window = FaceAccessApp()
-    
     window.show()
-
     sys.exit(app.exec())
