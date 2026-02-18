@@ -3,6 +3,7 @@ import os
 import time
 import cv2
 import geocoder
+import requests
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
@@ -13,6 +14,25 @@ from PyQt6.QtCore import QTimer, Qt, QUrl
 from PyQt6.QtGui import QImage, QPixmap, QFont, QDesktopServices
 
 class FaceAccessApp(QWidget):
+
+    def send_telegram_alert(self):
+        bot_token = "8279505027:AAH7Ubufn9ZYVWNFgBAiUDUqO_kTuAo5Klo"
+        chat_id = "1913865344"
+
+        message = f"INTRUSIONE RILEVATA!\n\nData: {time.strftime('%d/%m/%Y')}\nOra: {time.strftime('%H:%M:%S')}\nCittà: {self.city_name}"
+
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+        data = {
+            "chat_id": chat_id,
+            "text": message
+        }
+
+        try:
+            requests.post(url, data=data, timeout=5)
+            print("Notifica Telegram inviata!")
+        except Exception as e:
+            print("Errore Telegram:", e)
 
     def open_log_file(self):
         log_path = os.path.join(os.getcwd(), "registro_eventi.txt")
@@ -29,17 +49,14 @@ class FaceAccessApp(QWidget):
     def __init__(self):
         super().__init__()
 
-        # AKAZE invece di ORB → molto più stabile per oggetti in mano
         self.detector = cv2.AKAZE_create()
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-        self.known_objects = {}                     # nome → des
-        self.known_kp = {}                          # nome → kp
-
+        self.known_objects = {}                     
+        self.known_kp = {}                    
         self.scan_flash = 0
         self.pending_bbox = None
-
-        # Persistenza nome (sparisce dopo ~1.2 s se oggetto esce)
+ 
         self.current_name = None
         self.last_good_time = 0
         self.name_persistence_sec = 1.2
@@ -48,7 +65,7 @@ class FaceAccessApp(QWidget):
             g = geocoder.ip('me')
             self.city_name = g.city if g.ok and g.city else "Città non rilevata"
         except Exception:
-            self.city_name = "Bologna"
+            self.city_name ="Bologna"
 
         self.setWindowTitle("Accesso Biometrico")
         self.resize(1020, 900)
@@ -93,8 +110,37 @@ class FaceAccessApp(QWidget):
         if self.face_cascade.empty():
             print("Errore: impossibile caricare haarcascade_frontalface_default.xml")
 
+        self.infrared_mode = False
+
+        # ── Bottoni toggle ───────────────────────────────────────
+        self.btn_infrared_mode = QPushButton("Modalità Infrarossi")
+        self.btn_infrared_mode.setCheckable(True)
+        self.btn_infrared_mode.setStyleSheet("""
+            QPushButton:checked { background: #8B0000; color: white; font-weight: bold; }
+        """)
+        self.btn_infrared_mode.clicked.connect(self.toggle_infrared_mode)
+
+        self.btn_auto_zoom = QPushButton("AUTO ZOOM FACE")
+        self.btn_auto_zoom.setCheckable(True)
+        self.btn_auto_zoom.clicked.connect(self.toggle_auto_zoom)
+
+        self.btn_invert = QPushButton("INVERTI COLORI")
+        self.btn_invert.setCheckable(True)
+        self.btn_invert.clicked.connect(self.toggle_invert_colors)
+
+        self.btn_color = QPushButton("CAMBIA COLORE RIQUADRO")
+        self.btn_color.clicked.connect(self.cycle_face_color)
+
+        self.btn_motion = QPushButton("Motion Record")
+        self.btn_motion.setCheckable(True)
+        self.btn_motion.clicked.connect(self.toggle_motion_detection)
+
         self.init_ui()
         self.update_stats()
+
+    def toggle_infrared_mode(self):
+        self.infrared_mode = self.btn_infrared_mode.isChecked()
+        print(f"Modalità Infrarossi: {'ATTIVA' if self.infrared_mode else 'DISATTIVA'}")
 
     def init_ui(self):
         self.setStyleSheet("""
@@ -121,13 +167,13 @@ class FaceAccessApp(QWidget):
         left_panel = QVBoxLayout()
         left_panel.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        lbl_oggetto = QLabel("Impara oggetto da scansionare")
+        lbl_oggetto = QLabel("inserire oggetto")
         lbl_oggetto.setStyleSheet("font-weight: bold; color: #5bc0de;")
         self.object_name_input = QLineEdit()
-        self.object_name_input.setPlaceholderText("es: Telefono, Chiavi, Portafoglio")
+        self.object_name_input.setPlaceholderText("INSERIRE NOME OGGETTO")
         self.object_name_input.setFixedWidth(280)
 
-        self.btn_learn_object = QPushButton("Impara oggetto (poi scannerizza)")
+        self.btn_learn_object = QPushButton("Inserire oggetto")
         self.btn_learn_object.clicked.connect(self.learn_object)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -136,38 +182,26 @@ class FaceAccessApp(QWidget):
         self.zoom_slider.setFixedWidth(280)
         self.zoom_slider.valueChanged.connect(self.set_zoom)
 
-        self.btn_auto_zoom = QPushButton("AUTO ZOOM FACE")
-        self.btn_auto_zoom.setCheckable(True)
-        self.btn_auto_zoom.clicked.connect(self.toggle_auto_zoom)
+        # Gruppo toggle (senza notte)
+        toggles_layout = QVBoxLayout()
+        toggles_layout.setSpacing(8)
 
-        self.btn_invert = QPushButton("INVERTI COLORI")
-        self.btn_invert.setCheckable(True)
-        self.btn_invert.clicked.connect(self.toggle_invert_colors)
-
-        self.btn_color = QPushButton("CAMBIA COLORE RIQUADRO")
-        self.btn_color.clicked.connect(self.cycle_face_color)
-
-        self.btn_motion = QPushButton("Motion Record")
-        self.btn_motion.setCheckable(True)
-        self.btn_motion.clicked.connect(self.toggle_motion_detection)
-
-        for btn in (self.btn_auto_zoom, self.btn_invert, self.btn_color, self.btn_motion):
+        for btn in (self.btn_infrared_mode, self.btn_auto_zoom,
+                    self.btn_invert, self.btn_color, self.btn_motion):
             btn.setStyleSheet("""
                 QPushButton { background:#141414; color:#8f9aa3; border:1px solid #2f2f2f;
                               border-radius:600px; padding:10px 40px; }
                 QPushButton:hover { background:#1c1c1c; }
                 QPushButton:checked { background:#0f2a33; color:#5bc0de; border-color:#5bc0de; }
             """)
+            toggles_layout.addWidget(btn)
 
         left_panel.addWidget(lbl_oggetto)
         left_panel.addWidget(self.object_name_input)
         left_panel.addWidget(self.btn_learn_object)
         left_panel.addSpacing(20)
         left_panel.addWidget(self.zoom_slider)
-        left_panel.addWidget(self.btn_auto_zoom)
-        left_panel.addWidget(self.btn_invert)
-        left_panel.addWidget(self.btn_color)
-        left_panel.addWidget(self.btn_motion)
+        left_panel.addLayout(toggles_layout)
         left_panel.addStretch()
 
         self.video_label = QLabel("Camera inattiva")
@@ -303,6 +337,7 @@ class FaceAccessApp(QWidget):
                 return
 
             self.cap = cv2.VideoCapture(idx)
+
             if not self.cap.isOpened():
                 self.video_label.setText("Errore: impossibile aprire la camera")
                 return
@@ -323,12 +358,21 @@ class FaceAccessApp(QWidget):
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.infrared_mode:
+            # Simulazione infrarossi fake
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            display_frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
+            # Rumore termico realistico
+            noise = np.random.normal(0, 6, display_frame.shape).astype(np.int16)
+            display_frame = np.clip(display_frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        else:
+            display_frame = frame.copy()
+
+        gray = cv2.cvtColor(display_frame, cv2.COLOR_BGR2GRAY)
         gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
 
         faces = self.face_cascade.detectMultiScale(gray_blur, 1.3, 5)
-
-        display_frame = frame.copy()
 
         kp_scene, des_scene = self.detector.detectAndCompute(gray, None)
 
@@ -351,7 +395,6 @@ class FaceAccessApp(QWidget):
 
         now = time.time()
 
-        # Persistenza: nome sparisce dopo 1.2 secondi se non più rilevato
         if recognized_name is not None and best_good_matches >= 15:
             self.current_name = recognized_name
             self.last_good_time = now
@@ -382,7 +425,7 @@ class FaceAccessApp(QWidget):
             show_text = True
         elif kp_scene is not None and len(kp_scene) > 150:
             color = (0, 180, 255) if self.scan_flash < 10 else (0, 120, 255)
-            text = "NUOVO OGGETTO – Nomina!"
+            text = "Inserire nome oggetto "
             text_color = (0, 180, 255)
             show_text = True
 
@@ -411,6 +454,7 @@ class FaceAccessApp(QWidget):
 
                 if not self.recording and motion_detected:
                     self.start_recording(motion_mode=True)
+                    self.send_telegram_alert()
 
                 if self.motion_recording and (current_time - self.last_motion_time > self.max_motion_duration):
                     self._stop_recording()
@@ -452,6 +496,10 @@ class FaceAccessApp(QWidget):
         now_str = time.strftime("%d/%m/%Y %H:%M:%S")
         cv2.putText(display_frame, now_str, (20, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.putText(display_frame, f"📍 {self.city_name}", (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        if self.infrared_mode:
+            cv2.putText(display_frame, "Modalità Infrarossi ", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (220, 180, 180), 3)
 
         self.last_frame = display_frame.copy()
 
@@ -578,3 +626,4 @@ if __name__ == "__main__":
     window = FaceAccessApp()
     window.show()
     sys.exit(app.exec())
+
