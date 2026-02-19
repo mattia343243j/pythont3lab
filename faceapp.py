@@ -112,7 +112,7 @@ class FaceAccessApp(QWidget):
 
         self.infrared_mode = False
 
-        # ── Bottoni toggle ───────────────────────────────────────
+        # Bottoni toggle (come prima)
         self.btn_infrared_mode = QPushButton("Modalità Infrarossi")
         self.btn_infrared_mode.setCheckable(True)
         self.btn_infrared_mode.setStyleSheet("""
@@ -495,12 +495,14 @@ class FaceAccessApp(QWidget):
 
         now_str = time.strftime("%d/%m/%Y %H:%M:%S")
         cv2.putText(display_frame, now_str, (20, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        cv2.putText(display_frame, f"📍 {self.city_name}", (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(display_frame, f"{self.city_name}", (20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+        # Scrivi la scritta solo se modalità infrarossi è attiva
         if self.infrared_mode:
             cv2.putText(display_frame, "Modalità Infrarossi ", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (220, 180, 180), 3)
 
+        # IMPORTANTE: aggiorniamo SEMPRE last_frame (era dentro l'if prima → bug)
         self.last_frame = display_frame.copy()
 
         if self.video_writer is not None and self.recording:
@@ -626,4 +628,3 @@ if __name__ == "__main__":
     window = FaceAccessApp()
     window.show()
     sys.exit(app.exec())
-
